@@ -12,5 +12,5 @@ Tasks:
 
  - Blessings: Neural network classifier and testing
  - Suvir: Sentiment analysis and topic modelling
- - Vaughn: Alternativee classifier and exploratory analysis
+ - Vaughn: Alternative classifier and exploratory analysis
 
