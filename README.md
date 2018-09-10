@@ -10,7 +10,7 @@ Group members: Blessings Hadebe, Suvir Gajadhur, Vaughn Saben
 
 Tasks: 
 
-(1) Blessings: Neural network classifier and testing
-(2) Suvir: Sentiment analysis and topic modelling
-(3) Vaughn: Bag-of-words classifier and exploratory analysis
+ - Blessings: Neural network classifier and testing
+ - Suvir: Sentiment analysis and topic modelling
+ - Vaughn: Alternativee classifier and exploratory analysis
 
