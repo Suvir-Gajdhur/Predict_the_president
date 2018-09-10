@@ -1,0 +1,266 @@
+---
+title: "Bag-of-words"
+author: "Vaughn Saben"
+date: "08 September 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## SECTION 0: DATA AND DATA PROCESSING
+
+### a. Required Packages
+
+```{r}
+library(tidyverse)
+library(tidytext)
+
+library(stringr)
+library(doParallel)
+```
+
+### b. Read in data
+
+```{r}
+library(readtext)
+
+speeches <- readtext("data/sona-text-1994-2018")
+nspeeches <- nrow(speeches)
+
+## Extract date information
+
+# First newline character
+
+date_all_index <- str_locate(speeches$text,"\n")[, 1]
+
+library(lubridate)
+
+dates <- foreach(i = 1:nspeeches, .combine = c) %do% {
+   str_sub(speeches$text[i], start = 1, end = date_all_index[i] - 1)
+}
+
+# Add date information to table
+
+library(dplyr)
+
+speeches <- speeches %>% mutate(date = dmy(dates))
+
+## Remove: date information AND line breaks from speech text
+
+speeches$text <- foreach(i = 1:nspeeches, .combine = c) %do% {
+  speeches$text[i] <- str_sub(speeches$text[i], start = date_all_index[i])
+  speeches$text[i] <- str_replace_all(speeches$text[i], "[\r\n]", " ")
+}
+
+## Add: President
+
+presidents <- unlist(str_extract_all(speeches$doc_id, "[A-Z][a-z]+"))
+
+speeches$president <- presidents
+
+```
+
+### c. Data properties
+
+```{r}
+
+## Time: First, last AND time range of speech data
+
+min(speeches$date) # Earliest
+max(speeches$date) # Latest
+
+max(speeches$date) - min(speeches$date) # Time range
+
+# Plot:
+
+library(ggplot2)
+
+ggplot(speeches, aes(x = date, fill = president)) +
+  geom_histogram(position = "identity", 
+                 bins = 30, 
+                 show.legend = T) + 
+  labs(x = "Date", 
+       y = "Count") 
+
+## Number of speeches by each president 
+
+table(speeches$president)
+                
+```
+
+### d. Tokenisation
+
+```{r}
+
+## Sentences
+
+tidy_speeches_sen <- unnest_tokens(speeches, sentences, text, token = "sentences")
+
+## Words
+
+tidy_speeches_word <- unnest_tokens(speeches, word, text, token = "words") %>% filter(!word %in% stop_words$word, str_detect(word, "[a-z]")) 
+
+# Plot: Most commonly used words
+
+# > Absolute
+
+tidy_speeches_word %>%
+  group_by(president) %>%
+  count(word, sort = TRUE) %>%
+  filter(rank(desc(n)) <= 20) %>%
+  ggplot(aes(reorder(word, n), n, fill = president)) + geom_col() + coord_flip() + labs(x = "")
+
+# > Relative
+
+total_speeches <- tidy_speeches_word %>% 
+  group_by(president) %>% 
+  summarise(total = n())
+
+tidy_speeches_word %>%
+  group_by(president) %>% 
+  count(word, sort = TRUE) %>%                              # Count: Number of times word used 
+  left_join(total_speeches) %>%                             # Add: Total speeches for each president
+  mutate(freq = n/total) %>%                                # Add relative frequencies
+  filter(rank(desc(freq)) < 20) %>%
+  ggplot(aes(reorder(word, freq), freq, fill = president)) + 
+  geom_col() + 
+  coord_flip() + 
+    xlab("") +
+  facet_grid(.~president)
+
+## Bigrams
+
+tidy_speeches_bigrams <- speeches %>%
+  # mutate(text = str_replace_all(text, replace_reg, "")) %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+# a. Separate the bigrams 
+
+library(tidyr)
+
+bigrams_separated <- tidy_speech_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+# b. Remove stop words
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# c. Rejoin bigrams
+
+bigrams_united <- bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+
+# Plot: Most common bigrams 
+
+bigrams_united %>% 
+  group_by(president) %>%
+  count(bigram, sort = TRUE) %>% 
+  left_join(total_speeches) %>%                             # Add: Total speeches for each president
+  mutate(freq = n/total) %>%                                # Add relative frequencies
+  filter(rank(desc(freq)) < 20) %>%
+  ggplot(aes(reorder(bigram, freq), freq, fill = president)) + 
+  geom_col() + 
+  coord_flip() + 
+    xlab("") +
+  facet_grid(.~president)
+
+```
+
+## 1: Bag-of-words
+
+```{r}
+word_bag <- tidy_speeches_word %>%
+  group_by(word) %>%
+  count() %>%
+  ungroup() %>%
+  top_n(2000, wt = n) %>%
+  select(-n)
+
+nrow(word_bag)
+
+speeches_tdf <- tidy_speeches_word %>%
+  inner_join(word_bag) %>%
+  group_by(doc_id, word) %>%
+  count() %>%  
+  group_by(doc_id) %>%
+  mutate(total = sum(n)) %>%
+  ungroup()
+
+# tdf (excl. stop words)
+
+speeches_tdf <- speeches_tdf %>% 
+  bind_tf_idf(word, doc_id, n)
+
+bag_of_words <- speeches_tdf %>% 
+  select(doc_id, word, tf_idf) %>% 
+  spread(key = word, value = tf_idf, fill = 0) %>%
+  left_join(select(speeches, doc_id, president), by = "doc_id") %>%
+  select(doc_id, president.y, everything())
+
+# Number of words
+
+ncol(bag_of_words) - 2
+
+table(bag_of_words$president.y) # No lost
+
+## Building a bag of words classifier
+
+set.seed(11)
+training_ids <- bag_of_words %>% 
+  group_by(president.y) %>% 
+  sample_frac(0.7) %>% 
+  ungroup() %>%
+  select(doc_id)
+
+training_speeches <- bag_of_words %>% 
+  right_join(training_ids, by = "doc_id") %>%
+  select(-doc_id)
+
+test_speeches <- bag_of_words %>% 
+  anti_join(training_ids, by = "doc_id") %>%
+  select(-doc_id)
+
+# Fit
+
+library(rpart)
+
+fit <- rpart(factor(president.y) ~ ., training_speeches)
+
+# Plot
+
+options(repr.plot.width = 8, repr.plot.height = 10)
+plot(fit, main = "Full Classification Tree")
+text(fit, use.n = TRUE, all = TRUE, cex=.8)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
