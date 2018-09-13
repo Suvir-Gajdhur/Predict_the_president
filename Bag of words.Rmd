@@ -2,7 +2,7 @@
 title: "Bag-of-words"
 author: "Vaughn Saben"
 date: "08 September 2018"
-output: html_document
+output: markdown_document
 ---
 
 ```{r setup, include=FALSE}
@@ -16,9 +16,12 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 library(tidyverse)
 library(tidytext)
+library(dplyr)
 
 library(stringr)
 library(doParallel)
+
+library(rpart)
 ```
 
 ### b. Read in data
@@ -56,57 +59,144 @@ speeches$text <- foreach(i = 1:nspeeches, .combine = c) %do% {
 
 ## Add: President
 
-presidents <- unlist(str_extract_all(speeches$doc_id, "[A-Z][a-z]+"))
+president_id <- unlist(str_extract_all(speeches$doc_id, "[A-Z][a-z]+"))
 
-speeches$president <- presidents
+speeches$president_id <- president_id
 
 ```
 
-### c. Data properties
+### c. Tokenisation (sentences)
 
 ```{r}
-
-## Time: First, last AND time range of speech data
-
-min(speeches$date) # Earliest
-max(speeches$date) # Latest
-
-max(speeches$date) - min(speeches$date) # Time range
-
-# Plot:
-
-library(ggplot2)
-
-ggplot(speeches, aes(x = date, fill = president)) +
-  geom_histogram(position = "identity", 
-                 bins = 30, 
-                 show.legend = T) + 
-  labs(x = "Date", 
-       y = "Count") 
-
-## Number of speeches by each president 
-
-table(speeches$president)
-                
-```
-
-### d. Tokenisation
-
-```{r}
-
 ## Sentences
 
-tidy_speeches_sen <- unnest_tokens(speeches, sentences, text, token = "sentences")
+tidy_sen <- unnest_tokens(speeches, 
+                          sentences, 
+                          text, 
+                          token = "sentences")
+tidy_sen <- mutate(tidy_sen, sen_id = 1:nrow(tidy_sen))
+```
 
-## Words
+### d. Convert into bag-of-words form
 
-tidy_speeches_word <- unnest_tokens(speeches, word, text, token = "words") %>% filter(!word %in% stop_words$word, str_detect(word, "[a-z]")) 
+```{r}
 
-# Plot: Most commonly used words
+# Word tokenisation
+
+tidy_word <- unnest_tokens(tidy_sen, 
+                           word, 
+                           sentences, 
+                           token = "words") 
+
+# Inverse term frequency weightings
+
+sentence_tdf <- tidy_word %>% 
+  group_by(sen_id, word) %>%
+  count() %>%
+  group_by(sen_id) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>% 
+  bind_tf_idf(word, sen_id, n)
+
+# Bag of words
+
+bag_of_words <- sentence_tdf %>% 
+  select(sen_id, word, tf_idf) %>% 
+  spread(key = word, value = tf_idf, fill = 0) %>% 
+  left_join(select(tidy_sen, sen_id, president_id), by = "sen_id") %>%
+  select(sen_id, president_id, everything())
+  
+nrow(bag_of_words) # Number of documents
+ncol(bag_of_words) # Number of variables (words, plus id and response)
+```
+
+### e. Split sentence data into training (70%) and test (30%) sets
+
+```{r}
+
+set.seed(11)
+
+# Training
+
+training_sen_id <- bag_of_words %>%
+  group_by(president_id) %>%
+  sample_frac(0.7) %>%
+  ungroup() %>%
+  select(sen_id) %>%
+  unlist()
+
+training_sen <- subset(bag_of_words, unlist(sen_id) %in% training_sen_id) %>% 
+  select(-sen_id)
+
+# Testing 
+
+testing_sen <- subset(bag_of_words, !(unlist(sen_id) %in% training_sen_id)) %>% 
+  select(-sen_id)
+
+```
+
+### f. Fit classification tree
+
+```{r}
+
+## Classification tree
+
+rpart_fit <- rpart(factor(president_id) ~ ., training_sen)
+
+# Plot
+
+options(repr.plot.width = 8, repr.plot.height = 10)
+plot(rpart_fit, main = "Full Classification Tree")
+text(rpart_fit, use.n = T, all = T, cex = .8)
+
+# Accuracy
+
+# > Training
+
+rpart_fitTrain <- predict(rpart_fit, type = "class")
+rpart_predTrain <- table(training_sen$president_id, rpart_fitTrain)
+rpart_predTrain
+
+sum(diag(rpart_predTrain))/(sum(rpart_predTrain)) # Training accuracy
+
+# > Test
+
+rpart_fitTest <- predict(rpart_fit, newdata = testing_sen, type = "class")
+rpart_predTest <- table(testing_sen$president_id, rpart_fitTest)
+rpart_predTest
+
+sum(diag(rpart_predTest))/sum(rpart_predTest) # Test accuracy
+
+## Random forest
+
+library(randomForest)
+
+rf_names <- str_extract(names(training_sen),"\\b[a-zA-Z]+\\b")
+rf_word_bag <- rf_names[!is.na(rf_names)] 
+
+rf_fit <- randomForest(
+  as.factor(president_id) ~ rf_word_bag, 
+  data = training_sen, 
+  ntree = 1000, 
+  importance = T, 
+  do.trace = 100, 
+  xtest = testing_sen[-president_id], 
+  ytest = as.factor(testing_sen[president_id]))
+
+```
+
+
+
+
+
+
+#### i. Plot: Most commonly used words
+
+```{r}
 
 # > Absolute
 
-tidy_speeches_word %>%
+tidy_word %>%
   group_by(president) %>%
   count(word, sort = TRUE) %>%
   filter(rank(desc(n)) <= 20) %>%
@@ -239,7 +329,33 @@ text(fit, use.n = TRUE, all = TRUE, cex=.8)
 
 ```
 
+### c. Data properties
 
+```{r}
+
+## Time: First, last AND time range of speech data
+
+min(speeches$date) # Earliest
+max(speeches$date) # Latest
+
+max(speeches$date) - min(speeches$date) # Time range
+
+# Plot:
+
+library(ggplot2)
+
+ggplot(speeches, aes(x = date, fill = president)) +
+  geom_histogram(position = "identity", 
+                 bins = 30, 
+                 show.legend = T) + 
+  labs(x = "Date", 
+       y = "Count") 
+
+## Number of speeches by each president 
+
+table(speeches$president)
+                
+```
 
 
 
