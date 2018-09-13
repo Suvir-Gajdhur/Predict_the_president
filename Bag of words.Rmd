@@ -171,7 +171,7 @@ sum(diag(rpart_predTest))/sum(rpart_predTest) # Test accuracy
 
 library(randomForest)
 
-rf_names <- str_extract(names(training_sen),"\\b[a-zA-Z]+\\b")
+rf_names <- str_extract(names(training_sen),"\\b[a-zA-Z'?]+\\b")
 rf_word_bag <- rf_names[!is.na(rf_names)] 
 
 rf_fit <- randomForest(
@@ -358,7 +358,77 @@ table(speeches$president)
 ```
 
 
+## 2: Neural networks
 
+```{r}
+
+library(tensorflow)
+library(keras)
+library(modelr)
+
+model <- keras_model_sequential()
+
+model %>%
+  
+  layer_dense(units = 512, activation = 'relu', input_shape = c(8793)) %>%
+  
+  # embedding layer maps vocab indices into embedding_dims dimensions
+  # layer_embedding(input_dim = vocab_size, output_dim = embedding_dims, 
+  #                input_length = maxlen) %>%
+  # add some dropout
+  
+  layer_dropout(0.2) %>%
+  
+  # convolutional layer
+  
+  # layer_conv_1d(
+  #   filters = 250,
+  #   kernel_size = 3,
+  #   padding = "valid",  # "valid" means no padding, as we did it already
+  #   activation = "relu",
+  #   strides = 1
+  # ) %>%
+  # layer_global_max_pooling_1d() %>%
+  
+  layer_dense(128) %>%
+  layer_dropout(0.2) %>%
+  layer_activation("relu") %>%
+  layer_dense(6) %>%   # six unit output layer
+  layer_activation("softmax")
+
+  
+# model <- keras_model_sequential() %>% 
+#     layer_dense(units = 16, activation = "relu", input_shape = c(maxlen)) %>% 
+#     layer_dense(units = 16, activation = "relu") %>% 
+#     layer_dense(units = 6, activation = "softmax")  
+
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = "adam",
+  metrics = "accuracy"
+)
+
+arow <- which(apply(x_train, 1, function(x){ sum(x) == 0}))
+acol <- which(apply(x_train, 2, function(x){ sum(x) == 0}))
+
+x_train <- as.matrix(as.data.frame(training_sen[, rf_word_bag]))[-arow, -acol]
+y_train <- model_matrix(training_sen[-arow, ],  ~ president_id - 1)
+
+ncol(x_train)
+
+model %>%
+  fit(
+    x_train, y_train,
+    batch_size = 32,
+    epochs = 30,
+    validation_split = 0.2,
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      callback_reduce_lr_on_plateau(patience = 3)
+    )
+  )
+
+```
 
 
 
