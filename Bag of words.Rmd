@@ -50,7 +50,7 @@ library(dplyr)
 
 speeches <- speeches %>% mutate(date = dmy(dates))
 
-## Remove: date information AND line breaks from speech text
+## Remove: date information, line breaks and unwanted characters from speech text
 
 speeches$text <- foreach(i = 1:nspeeches, .combine = c) %do% {
   speeches$text[i] <- str_sub(speeches$text[i], start = date_all_index[i])
@@ -80,7 +80,6 @@ tidy_sen <- mutate(tidy_sen, sen_id = 1:nrow(tidy_sen))
 ### d. Convert into bag-of-words form
 
 ```{r}
-
 # Word tokenisation
 
 tidy_word <- unnest_tokens(tidy_sen, 
@@ -110,9 +109,17 @@ nrow(bag_of_words) # Number of documents
 ncol(bag_of_words) # Number of variables (words, plus id and response)
 ```
 
-### e. Split sentence data into training (70%) and test (30%) sets
+## SECTION 1: Build a bag-of-words classifier 
 
-```{r}
+In addition to the neural network classifier, a classification tree was built to provide a benchmark performance measure. 2 approaches to the classification splitting procedure priors are investigated: 
+
+1. Default classification priors: Each president's prior probability is a proportional to the sentence counts 
+2. Equal classification priors: Each president's prior probability is equal to 1/6.
+
+The sentence data is split into training (70%) and test (30%) sets. The minimum number of observations in a node, for a split to be considered, is set to 10 to enable all presidents to be possible classification outputs. The minimum number of observation permitted in a terminal is also lowered for the same reason.
+
+```{r, echo = F, eval = T}
+# 1: Split sentence data into training (70%) and test (30%) sets
 
 set.seed(11)
 
@@ -133,104 +140,194 @@ training_sen <- subset(bag_of_words, unlist(sen_id) %in% training_sen_id) %>%
 testing_sen <- subset(bag_of_words, !(unlist(sen_id) %in% training_sen_id)) %>% 
   select(-sen_id)
 
+# 2: Fit classification tree
+
+rpart_fit_eqp <- rpart(factor(president_id) ~ ., 
+                       data = training_sen, 
+                       method = "class", 
+                       parms = list(prior = rep(1/6, 6)),
+                       control = rpart.control(minsplit = 10, 
+                                               minbucket = 5))
+
+rpart_fit_neqp <- rpart(factor(president_id) ~ ., 
+                        data = training_sen, 
+                        method = "class", 
+                        control = rpart.control(minsplit = 10, 
+                                                minbucket = 5))
+
+# Min split: Minimum number of observations that must exist in a node in order for a split to be attempted
+# Min bucket: Minimum number of observations in a terminal
+
+# Parms: 
+# > Default priors for classification spitting: proportional to data counts 
+# > Heavily favour Mbeki and Zuma (i.e. the presidents with the longest terms)
+# > Adjust equal prior probabilities
+
 ```
 
-### f. Fit classification tree
+#### Results
+
+**Classification tree - default prior configuration**: The classification tree classifies *Mbeki* and *Zuma* only. Some classifications 
 
 ```{r}
-
-## Classification tree
-
-rpart_fit <- rpart(factor(president_id) ~ ., training_sen)
-
-# Plot
+# Frequency weighted priors
 
 options(repr.plot.width = 8, repr.plot.height = 10)
-plot(rpart_fit, main = "Full Classification Tree")
-text(rpart_fit, use.n = T, all = T, cex = .8)
+plot(rpart_fit_neqp, main = "Full Classification Tree")
+text(rpart_fit_neqp, use.n = T, all = T, cex = .7)
 
-# Accuracy
+# > Only Mbeki and Zuma may be classified (longer president terms)
+# > Some classification based on sentence constructors, especially first split
 
-# > Training
+# Equal priors
 
-rpart_fitTrain <- predict(rpart_fit, type = "class")
-rpart_predTrain <- table(training_sen$president_id, rpart_fitTrain)
-rpart_predTrain
+options(repr.plot.width = 8, repr.plot.height = 10)
+plot(rpart_fit_eqp, main = "Full Classification Tree")
+text(rpart_fit_eqp, use.n = T, all = T, cex = .7)
 
-sum(diag(rpart_predTrain))/(sum(rpart_predTrain)) # Training accuracy
+# > More presidents may be classified
+# > Single branch has many levels
+# > Classification based on both sentence constructors and insightful words 
 
-# > Test
 
-rpart_fitTest <- predict(rpart_fit, newdata = testing_sen, type = "class")
-rpart_predTest <- table(testing_sen$president_id, rpart_fitTest)
-rpart_predTest
 
-sum(diag(rpart_predTest))/sum(rpart_predTest) # Test accuracy
+## Accuracy
 
-## Random forest
+# Function: Training
 
-library(randomForest)
+rpart_train_accuracy <- function(fit, data){
+  rpart_fit_train <- predict(fit, type = "class")
+  rpart_pred_train <- table(data$president_id, rpart_fit_train)
+  accuracy = sum(diag(rpart_pred_train))/(sum(rpart_pred_train))
+  list("Predictions" = rpart_pred_train, 
+       "Accuracy" = accuracy)
+}
 
-rf_names <- str_extract(names(training_sen),"\\b[a-zA-Z'?]+\\b")
-rf_word_bag <- rf_names[!is.na(rf_names)] 
+# Output: Training
 
-rf_fit <- randomForest(
-  as.factor(president_id) ~ rf_word_bag, 
-  data = training_sen, 
-  ntree = 1000, 
-  importance = T, 
-  do.trace = 100, 
-  xtest = testing_sen[-president_id], 
-  ytest = as.factor(testing_sen[president_id]))
+rpart_train_accuracy_eqp <- rpart_train_accuracy(rpart_fit_eqp, training_sen)
+
+# > Mandela never predicted
+# > Many predictioon errors
+# > Unbalanced number of sentences associated with each president:
+#   - More than half correctly predicted: Klerk, Motlanthe
+# > Low accuracy: < 0.2 >> Poor model
+
+rpart_train_accuracy_neqp <- rpart_train_accuracy(rpart_fit_neqp, training_sen) 
+
+# > Mbeki and Zuma predicted only
+# > Mbeki speeches are predicted more IF Mbeki (and v.v.)
+# > Higher accuracy: Approximately 0.5 >> Need more levels
+
+# Function: Testing
+
+rpart_test_accuracy <- function(fit, data){
+  rpart_fit_test <- predict(fit, newdata = data, type = "class")
+  rpart_pred_test <- table(data$president_id, rpart_fit_test)
+  accuracy = sum(diag(rpart_pred_test))/(sum(rpart_pred_test))
+  list("Predictions" = rpart_pred_test, 
+       "Accuracy" = accuracy)
+}
+
+# Output: Testing
+
+rpart_test_accuracy_eqp <- rpart_test_accuracy(rpart_fit_eqp, testing_sen)
+
+# > Performs worse than on training set (accuracy = 0.17)
+# > Greatest frequency predicted correctly: Klerk, Motlanthe 
+
+rpart_test_accuracy_neqp <- rpart_test_accuracy(rpart_fit_neqp, testing_sen) 
+
+# > Performs similar to training set
+# > As seen on training set, Mbeki speeches are predicted more IF Mbeki (and v.v.)
 
 ```
 
+## SECTION 3: Exploratory analysis
 
+### a. Plot: Most commonly used words/bigrams (president comparison)
 
+#### i. Single words
 
+Absolute
 
+```{r, echo = F, eval = T, fig.cap = "Most commonly used words"}
 
-#### i. Plot: Most commonly used words
+library(drlib)
+
+tidy_word %>% 
+  filter(!word %in% stop_words$word) %>%
+  group_by(president_id) %>%
+  count(word, sort = TRUE) %>%
+  top_n(10, n) %>%
+  ungroup() %>% 
+  mutate(word = reorder_within(word, n, president_id)) %>%
+  ggplot(aes(word, n, fill = president_id)) + geom_col(show.legend = F) + 
+  scale_x_reoredered() + 
+  coord_flip() + facet_wrap(~ president_id, scales = "free_y") + labs(x = "")
+
+# > Remove stop words AS sentence construction words are non-informative
+# > Absolute word frequency is misleading >> different number of speeches
+# > Words:
+#   - Government (Mbeki) 
+#   - All (Mandela and Mbeki)
+
+```
+
+Relative
 
 ```{r}
 
-# > Absolute
-
-tidy_word %>%
-  group_by(president) %>%
-  count(word, sort = TRUE) %>%
-  filter(rank(desc(n)) <= 20) %>%
-  ggplot(aes(reorder(word, n), n, fill = president)) + geom_col() + coord_flip() + labs(x = "")
-
-# > Relative
-
-total_speeches <- tidy_speeches_word %>% 
-  group_by(president) %>% 
+total_speeches <- tidy_word %>% 
+  group_by(president_id) %>% 
   summarise(total = n())
 
-tidy_speeches_word %>%
-  group_by(president) %>% 
+tidy_word %>%
+  filter(!word %in% stop_words$word) %>%
+  group_by(president_id) %>% 
   count(word, sort = TRUE) %>%                              # Count: Number of times word used 
-  left_join(total_speeches) %>%                             # Add: Total speeches for each president
+  left_join(total_speeches, by = "president_id") %>%        # Add: Total speeches for each president
   mutate(freq = n/total) %>%                                # Add relative frequencies
   filter(rank(desc(freq)) < 20) %>%
-  ggplot(aes(reorder(word, freq), freq, fill = president)) + 
+  ggplot(aes(reorder(word, freq), freq, fill = president_id)) + 
   geom_col() + 
   coord_flip() + 
     xlab("") +
-  facet_grid(.~president)
+  facet_grid(.~ president_id)
 
-## Bigrams
+# Klerk has a reltively high frequency of mentioning the constitution 
+# > development of the constitution pre-1994 election
+# Government mentioned by Mbeki (as seen above)
+# Pronouns indicative of atmosphere: Relative "we" frequency of Ramaphosa suggest he is trying to unite the country
+# Sentence counstruction words are prevalent 
 
-tidy_speeches_bigrams <- speeches %>%
-  # mutate(text = str_replace_all(text, replace_reg, "")) %>%
-  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+```
+
+Weighted by inverse term frquency
+
+```{r}
+
+tidy_word %>% 
+  left_join(select(sentence_tdf, sen_id, word, tf_idf), by = c("sen_id", "word")) %>%
+  group_by(president_id, word) %>% 
+  filter(rank(desc(tf_idf)) < 5) %>%
+  ggplot(aes(reorder(word, tf_idf), tf_idf, fill = president_id)) + 
+  geom_col() + 
+  coord_flip() + 
+  xlab("")
+
+```
+
+#### ii. Bigrams
+
+```{r}
+
+tidy_bigrams <- tidy_sen %>% 
+  unnest_tokens(bigram, sentences, token = "ngrams", n = 2)
 
 # a. Separate the bigrams 
 
-library(tidyr)
-
-bigrams_separated <- tidy_speech_bigrams %>%
+bigrams_separated <- tidy_bigrams %>%
   separate(bigram, c("word1", "word2"), sep = " ")
 
 # b. Remove stop words
@@ -247,89 +344,25 @@ bigrams_united <- bigrams_filtered %>%
 # Plot: Most common bigrams 
 
 bigrams_united %>% 
-  group_by(president) %>%
+  group_by(president_id) %>%
   count(bigram, sort = TRUE) %>% 
   left_join(total_speeches) %>%                             # Add: Total speeches for each president
   mutate(freq = n/total) %>%                                # Add relative frequencies
-  filter(rank(desc(freq)) < 20) %>%
-  ggplot(aes(reorder(bigram, freq), freq, fill = president)) + 
+  filter(rank(desc(freq)) < 10) %>%
+  ggplot(aes(reorder(bigram, freq), freq, fill = president_id)) + 
   geom_col() + 
   coord_flip() + 
     xlab("") +
-  facet_grid(.~president)
+  facet_grid(.~president_id)
+
+# All presidents: South Africa/n focussed
+# De Klerk >> Focussed on own party and constitution/structure of future government
+# Mandela >> BEE, human rights, job creation (Priorities of gov.)
+# Mbeki >> 
 
 ```
 
-## 1: Bag-of-words
-
-```{r}
-word_bag <- tidy_speeches_word %>%
-  group_by(word) %>%
-  count() %>%
-  ungroup() %>%
-  top_n(2000, wt = n) %>%
-  select(-n)
-
-nrow(word_bag)
-
-speeches_tdf <- tidy_speeches_word %>%
-  inner_join(word_bag) %>%
-  group_by(doc_id, word) %>%
-  count() %>%  
-  group_by(doc_id) %>%
-  mutate(total = sum(n)) %>%
-  ungroup()
-
-# tdf (excl. stop words)
-
-speeches_tdf <- speeches_tdf %>% 
-  bind_tf_idf(word, doc_id, n)
-
-bag_of_words <- speeches_tdf %>% 
-  select(doc_id, word, tf_idf) %>% 
-  spread(key = word, value = tf_idf, fill = 0) %>%
-  left_join(select(speeches, doc_id, president), by = "doc_id") %>%
-  select(doc_id, president.y, everything())
-
-# Number of words
-
-ncol(bag_of_words) - 2
-
-table(bag_of_words$president.y) # No lost
-
-## Building a bag of words classifier
-
-set.seed(11)
-training_ids <- bag_of_words %>% 
-  group_by(president.y) %>% 
-  sample_frac(0.7) %>% 
-  ungroup() %>%
-  select(doc_id)
-
-training_speeches <- bag_of_words %>% 
-  right_join(training_ids, by = "doc_id") %>%
-  select(-doc_id)
-
-test_speeches <- bag_of_words %>% 
-  anti_join(training_ids, by = "doc_id") %>%
-  select(-doc_id)
-
-# Fit
-
-library(rpart)
-
-fit <- rpart(factor(president.y) ~ ., training_speeches)
-
-# Plot
-
-options(repr.plot.width = 8, repr.plot.height = 10)
-plot(fit, main = "Full Classification Tree")
-text(fit, use.n = TRUE, all = TRUE, cex=.8)
-
-
-```
-
-### c. Data properties
+### b. Data properties
 
 ```{r}
 
@@ -342,9 +375,7 @@ max(speeches$date) - min(speeches$date) # Time range
 
 # Plot:
 
-library(ggplot2)
-
-ggplot(speeches, aes(x = date, fill = president)) +
+ggplot(speeches, aes(x = date, fill = president_id)) +
   geom_histogram(position = "identity", 
                  bins = 30, 
                  show.legend = T) + 
@@ -357,78 +388,6 @@ table(speeches$president)
                 
 ```
 
-
-## 2: Neural networks
-
-```{r}
-
-library(tensorflow)
-library(keras)
-library(modelr)
-
-model <- keras_model_sequential()
-
-model %>%
-  
-  layer_dense(units = 512, activation = 'relu', input_shape = c(8793)) %>%
-  
-  # embedding layer maps vocab indices into embedding_dims dimensions
-  # layer_embedding(input_dim = vocab_size, output_dim = embedding_dims, 
-  #                input_length = maxlen) %>%
-  # add some dropout
-  
-  layer_dropout(0.2) %>%
-  
-  # convolutional layer
-  
-  # layer_conv_1d(
-  #   filters = 250,
-  #   kernel_size = 3,
-  #   padding = "valid",  # "valid" means no padding, as we did it already
-  #   activation = "relu",
-  #   strides = 1
-  # ) %>%
-  # layer_global_max_pooling_1d() %>%
-  
-  layer_dense(128) %>%
-  layer_dropout(0.2) %>%
-  layer_activation("relu") %>%
-  layer_dense(6) %>%   # six unit output layer
-  layer_activation("softmax")
-
-  
-# model <- keras_model_sequential() %>% 
-#     layer_dense(units = 16, activation = "relu", input_shape = c(maxlen)) %>% 
-#     layer_dense(units = 16, activation = "relu") %>% 
-#     layer_dense(units = 6, activation = "softmax")  
-
-model %>% compile(
-  loss = "categorical_crossentropy",
-  optimizer = "adam",
-  metrics = "accuracy"
-)
-
-arow <- which(apply(x_train, 1, function(x){ sum(x) == 0}))
-acol <- which(apply(x_train, 2, function(x){ sum(x) == 0}))
-
-x_train <- as.matrix(as.data.frame(training_sen[, rf_word_bag]))[-arow, -acol]
-y_train <- model_matrix(training_sen[-arow, ],  ~ president_id - 1)
-
-ncol(x_train)
-
-model %>%
-  fit(
-    x_train, y_train,
-    batch_size = 32,
-    epochs = 30,
-    validation_split = 0.2,
-    callbacks = list(
-      callback_early_stopping(patience = 5),
-      callback_reduce_lr_on_plateau(patience = 3)
-    )
-  )
-
-```
 
 
 
